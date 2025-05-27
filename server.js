@@ -3,6 +3,8 @@ import Fastify from 'fastify';
 import dotenv from 'dotenv';
 import prismaPlugin from './plugins/prisma.js';
 import redisPlugin from './plugins/redis.js';
+import cookie from '@fastify/cookie';
+import authRoutes from './routes/authRoutes.js';
 
 // Load environment variables
 dotenv.config();
@@ -14,7 +16,8 @@ try {
   // Register plugins
   await fastify.register(prismaPlugin);
   await fastify.register(redisPlugin);
-
+  await fastify.register(cookie, { secret: process.env.COOKIE_SECRET });
+  await fastify.register(authRoutes, { prefix: '/api/auth'});
   // Example route to test Redis
   fastify.get('/cache', async (req, reply) => {
     await fastify.redis.set('foo', 'bar');

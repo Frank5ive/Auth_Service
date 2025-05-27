@@ -1,9 +1,6 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client-js"
   output   = "../generated/prisma"
@@ -12,4 +9,59 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+// --- User table ---
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String?
+  role         String   @default("user") // e.g., user, admin, superadmin
+  isActive     Boolean  @default(true)
+  verified     Boolean  @default(false) // For OTP verification
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  sessions  Session[]
+  loginLogs LoginLog[]
+  otpTokens OTPToken[]
+}
+
+// --- Session (for refresh tokens) ---
+model Session {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id])
+  refreshToken String   @unique
+  userAgent    String?
+  ip           String?
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+}
+
+// --- Login monitoring logs ---
+model LoginLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  email     String
+  ip        String
+  userAgent String?
+  country   String?
+  city      String?
+  status    String // success, failed, locked, etc.
+  createdAt DateTime @default(now())
+}
+
+// --- OTP table (for verification, login, etc.) ---
+model OTPToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  code      String
+  type      String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
 }
