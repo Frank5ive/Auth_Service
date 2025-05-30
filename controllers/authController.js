@@ -9,12 +9,11 @@ import { sendOTPEmail } from '../services/otpService.js';
 
 const prisma = new PrismaClient();
 
-// Generate 6-digit OTP
 function generateOTP() {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
-// --- Register User ---
+// --- Register ---
 export const register = async (req, reply) => {
   const { email, password } = req.body;
 
@@ -32,14 +31,8 @@ export const register = async (req, reply) => {
     },
   });
 
-  await prisma.oTPToken.create({
-    data: {
-      userId: user.id,
-      code: otp,
-      type: 'verify',
-      expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 minutes
-    },
-  });
+  // ✅ Store OTP in Redis
+  await req.server.redis.set(`otp:${user.id}`, otp, { EX: 600 }); // 10 minutes
 
   await sendOTPEmail(email, otp);
 
@@ -51,31 +44,16 @@ export const verifyOTP = async (req, reply) => {
   const { email, otp } = req.body;
 
   const user = await prisma.user.findUnique({ where: { email } });
-  if (!user || user.verified) {
-    return reply.status(400).send({ error: 'User not found or already verified' });
-  }
+  if (!user || user.verified) return reply.status(400).send({ error: 'User not found or already verified' });
 
-  const otpToken = await prisma.oTPToken.findFirst({
-    where: {
-      userId: user.id,
-      code: otp,
-      type: 'verify',
-      expiresAt: { gt: new Date() },
-    },
-  });
-
-  if (!otpToken) {
+  // ✅ Fetch OTP from Redis
+  const storedOtp = await req.server.redis.get(`otp:${user.id}`);
+  if (!storedOtp || storedOtp !== otp) {
     return reply.status(400).send({ error: 'Invalid or expired OTP' });
   }
 
-  await prisma.user.update({
-    where: { email },
-    data: {
-      verified: true,
-    },
-  });
-
-  await prisma.oTPToken.delete({ where: { id: otpToken.id } });
+  await prisma.user.update({ where: { email }, data: { verified: true } });
+  await req.server.redis.del(`otp:${user.id}`);
 
   reply.send({ message: 'OTP verified. Account activated.' });
 };
@@ -83,26 +61,51 @@ export const verifyOTP = async (req, reply) => {
 // --- Login ---
 export const login = async (req, reply) => {
   const { email, password } = req.body;
+  const redis = req.server.redis;
 
   const user = await prisma.user.findUnique({ where: { email } });
-  if (!user || !(await argon2.verify(user.passwordHash, password)))
-    return reply.status(401).send({ error: 'Invalid credentials' });
+  const ip = req.ip;
+  const agent = req.headers['user-agent'] || 'unknown';
 
-  if (!user.verified)
-    return reply.status(403).send({ error: 'Account not verified. Check your email for OTP.' });
+  // ✅ Brute force protection (email/IP combo)
+  const failKey = `login:fail:${email}`;
+  const fails = parseInt(await redis.get(failKey)) || 0;
+
+  if (fails >= 5) {
+    return reply.status(429).send({ error: 'Too many failed attempts. Try again later.' });
+  }
+
+  if (!user || !(await argon2.verify(user.passwordHash, password))) {
+    await redis.incr(failKey);
+    await redis.expire(failKey, 900); // 15 min lock
+    return reply.status(401).send({ error: 'Invalid credentials' });
+  }
+
+  if (!user.verified) {
+    return reply.status(403).send({ error: 'Account not verified. Check your email.' });
+  }
 
   const accessToken = generateAccessToken({ userId: user.id, role: user.role });
   const refreshToken = generateRefreshToken({ userId: user.id });
 
+  // ✅ Save session in DB
   await prisma.session.create({
     data: {
       userId: user.id,
-      ip: req.ip,
-      userAgent: req.headers['user-agent'] || 'Unknown',
+      ip,
+      userAgent: agent,
       refreshToken,
-      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
     },
   });
+
+  // ✅ Save session in Redis
+  await redis.set(`session:${user.id}`, JSON.stringify({
+    ip, userAgent: agent, refreshToken,
+  }), { EX: 3600 }); // 1 hour
+
+  // ✅ Reset brute-force counter
+  await redis.del(failKey);
 
   reply
     .setCookie('accessToken', accessToken, {
@@ -125,9 +128,19 @@ export const login = async (req, reply) => {
 // --- Logout ---
 export const logout = async (req, reply) => {
   const { refreshToken } = req.cookies;
+  const redis = req.server.redis;
 
   if (refreshToken) {
     await prisma.session.deleteMany({ where: { refreshToken } });
+
+    try {
+      const userId = (await prisma.session.findFirst({
+        where: { refreshToken },
+        select: { userId: true },
+      }))?.userId;
+
+      if (userId) await redis.del(`session:${userId}`);
+    } catch {}
   }
 
   reply
@@ -136,9 +149,10 @@ export const logout = async (req, reply) => {
     .send({ message: 'Logged out successfully' });
 };
 
-// --- Renew Access Token ---
+// --- Renew Token ---
 export const renewToken = async (req, reply) => {
   const { refreshToken } = req.cookies;
+  const redis = req.server.redis;
 
   try {
     const decoded = verifyRefreshToken(refreshToken);
@@ -155,6 +169,14 @@ export const renewToken = async (req, reply) => {
       userId: decoded.userId,
       role: decoded.role,
     });
+
+    // ✅ Also update Redis session if exists
+    const redisSession = await redis.get(`session:${decoded.userId}`);
+    if (redisSession) {
+      const parsed = JSON.parse(redisSession);
+      parsed.lastAccess = Date.now();
+      await redis.set(`session:${decoded.userId}`, JSON.stringify(parsed), { EX: 3600 });
+    }
 
     reply.setCookie('accessToken', newAccessToken, {
       httpOnly: true,
