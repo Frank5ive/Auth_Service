@@ -1,7 +1,4 @@
-Okay, here's sample JSON data for testing the authentication routes you've provided, based on the `Auth.docx` file.
-
-Remember to replace placeholder values like `your-email@example.com` and `your-strong-password` with actual data you want to use for testing.
-
+### Sample Data
 ```json
 {
   "register": {
