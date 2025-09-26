@@ -7,6 +7,9 @@ import cookie from '@fastify/cookie';
 import authRoutes from './routes/authRoutes.js';
 import rateLimiter from './middleware/rateLimiter.js';
 
+import csrf from '@fastify/csrf-protection';
+import { AppError } from './utils/errors.js';
+
 // Load environment variables
 dotenv.config();
 
@@ -25,6 +28,18 @@ const fastify = Fastify({
   }
 });
 
+// Global error handler
+fastify.setErrorHandler((error, req, reply) => {
+  if (error instanceof AppError) {
+    reply.status(error.statusCode).send({ error: error.message, code: error.errorCode });
+  } else if (error.validation) {
+    reply.status(400).send({ error: 'Validation Failed', details: error.validation });
+  } else {
+    fastify.log.error(error);
+    reply.status(500).send({ error: 'Internal Server Error', code: 'GENERIC_ERROR' });
+  }
+});
+
 try {
   // Register plugins
   fastify.log.info('🔌 Initializing plugins...');
@@ -32,8 +47,15 @@ try {
   await fastify.register(prismaPlugin);
   await fastify.register(redisPlugin);
   await fastify.register(cookie, { secret: process.env.COOKIE_SECRET });
+  await fastify.register(csrf);
   await fastify.register(authRoutes, { prefix: '/api/auth'});
   fastify.log.info('✅ All plugins registered successfully');
+
+  // Route to get CSRF token
+  fastify.get('/api/csrf', (req, reply) => {
+    const token = reply.generateCsrf();
+    reply.send({ token });
+  });
 
   // Example route to test Redis
   fastify.get('/cache', async (req, reply) => {

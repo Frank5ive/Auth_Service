@@ -6,6 +6,7 @@ import {
   verifyRefreshToken,
 } from '../services/tokenService.js';
 import { sendOTPEmail } from '../services/otpService.js';
+import { BadRequestError, UnauthorizedError, ForbiddenError, TooManyRequestsError } from '../utils/errors.js';
 
 const prisma = new PrismaClient();
 
@@ -18,10 +19,11 @@ export const register = async (req, reply) => {
   const { email, password } = req.body;
 
   const existingUser = await prisma.user.findUnique({ where: { email } });
-  if (existingUser) return reply.status(400).send({ error: 'Email already in use' });
+  if (existingUser) throw new BadRequestError('Email already in use', 'EMAIL_IN_USE');
 
   const hashedPassword = await argon2.hash(password);
   const otp = generateOTP();
+  const hashedOtp = await argon2.hash(otp);
 
   const user = await prisma.user.create({
     data: {
@@ -32,7 +34,7 @@ export const register = async (req, reply) => {
   });
 
   // ✅ Store OTP in Redis
-  await req.server.redis.set(`otp:${user.id}`, otp, { EX: 600 }); // 10 minutes
+  await req.server.redis.set(`otp:${user.id}`, hashedOtp, { EX: 600 }); // 10 minutes
 
   await sendOTPEmail(email, otp);
 
@@ -44,12 +46,12 @@ export const verifyOTP = async (req, reply) => {
   const { email, otp } = req.body;
 
   const user = await prisma.user.findUnique({ where: { email } });
-  if (!user || user.verified) return reply.status(400).send({ error: 'User not found or already verified' });
+  if (!user || user.verified) throw new BadRequestError('User not found or already verified', 'USER_NOT_FOUND_OR_VERIFIED');
 
   // ✅ Fetch OTP from Redis
   const storedOtp = await req.server.redis.get(`otp:${user.id}`);
-  if (!storedOtp || storedOtp !== otp) {
-    return reply.status(400).send({ error: 'Invalid or expired OTP' });
+  if (!storedOtp || !(await argon2.verify(storedOtp, otp))) {
+    throw new BadRequestError('Invalid or expired OTP', 'INVALID_OR_EXPIRED_OTP');
   }
 
   await prisma.user.update({ where: { email }, data: { verified: true } });
@@ -72,17 +74,17 @@ export const login = async (req, reply) => {
   const fails = parseInt(await redis.get(failKey)) || 0;
 
   if (fails >= 5) {
-    return reply.status(429).send({ error: 'Too many failed attempts. Try again later.' });
+    throw new TooManyRequestsError('Too many failed attempts. Try again later.', 'TOO_MANY_LOGIN_ATTEMPTS');
   }
 
   if (!user || !(await argon2.verify(user.passwordHash, password))) {
     await redis.incr(failKey);
     await redis.expire(failKey, 900); // 15 min lock
-    return reply.status(401).send({ error: 'Invalid credentials' });
+    throw new UnauthorizedError('Invalid credentials', 'INVALID_CREDENTIALS');
   }
 
   if (!user.verified) {
-    return reply.status(403).send({ error: 'Account not verified. Check your email.' });
+    throw new ForbiddenError('Account not verified. Check your email.', 'ACCOUNT_NOT_VERIFIED');
   }
 
   const accessToken = generateAccessToken({ userId: user.id, role: user.role });
@@ -162,7 +164,7 @@ export const renewToken = async (req, reply) => {
     });
 
     if (!session || session.expiresAt < new Date()) {
-      return reply.status(401).send({ error: 'Session expired or invalid' });
+      throw new UnauthorizedError('Session expired or invalid', 'SESSION_EXPIRED_OR_INVALID');
     }
 
     const newAccessToken = generateAccessToken({
@@ -188,6 +190,6 @@ export const renewToken = async (req, reply) => {
 
     reply.send({ message: 'Access token renewed' });
   } catch (err) {
-    reply.status(401).send({ error: 'Invalid refresh token' });
+    throw new UnauthorizedError('Invalid refresh token', 'INVALID_REFRESH_TOKEN');
   }
 };

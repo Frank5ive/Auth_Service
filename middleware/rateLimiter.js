@@ -1,3 +1,5 @@
+import { TooManyRequestsError } from '../utils/errors.js';
+
 // middlewares/rateLimiter.js
 export default async function rateLimiter(fastify) {
   fastify.addHook('onRequest', async (req, reply) => {
@@ -9,7 +11,7 @@ export default async function rateLimiter(fastify) {
     const count = await fastify.redis.incr(key);
     if (count === 1) await fastify.redis.expire(key, ttl);
     if (count > max) {
-      return reply.status(429).send({ error: 'Too many requests' });
+      throw new TooManyRequestsError('Too many requests', 'TOO_MANY_REQUESTS');
     }
   });
 }
